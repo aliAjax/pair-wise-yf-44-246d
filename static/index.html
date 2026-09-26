@@ -17,6 +17,20 @@
   <p>这是最小演示页面。使用浏览器或 curl 调用 JSON API。</p>
   <p><button onclick="checkHealth()">检查服务状态</button></p>
   <pre id="result">等待操作</pre>
+  <h2>投产后效果复核</h2>
+  <p><button onclick="loadReviews()">刷新复核待办与结论</button></p>
+  <pre id="reviews">尚未加载</pre>
+  <p>
+    <input id="rvTask" placeholder="复核任务ID" size="34">
+    <input id="rvUser" placeholder="填写人" value="E-1" size="8">
+  </p>
+  <p><input id="rvConditions" placeholder="工况" size="40"></p>
+  <p><input id="rvMetrics" placeholder="指标" size="40"></p>
+  <p><input id="rvConclusion" placeholder="偏差结论" size="40"></p>
+  <p>
+    <label><input type="checkbox" id="rvExceeded"> 超标</label>
+    <button onclick="submitReview()">提交复核结论</button>
+  </p>
   <h2>常用接口</h2>
   <pre>GET  /health
 GET  /api/&lt;kind&gt;
@@ -28,6 +42,39 @@ POST /api/entities/&lt;id&gt;/actions</pre>
 async function checkHealth() {
   const response = await fetch('/health');
   document.getElementById('result').textContent = JSON.stringify(await response.json(), null, 2);
+}
+
+async function loadReviews() {
+  const response = await fetch('/api/review_tasks');
+  const items = (await response.json()).items || [];
+  const lines = items.map(t => {
+    const d = t.data || {};
+    const base = `[${t.status}] ${t.id} 变更=${d.change_id} 窗口=${d.window} 到期=${d.due_date}`;
+    if (t.status !== 'submitted') return base;
+    const verdict = d.within_limits === false ? '超标(已建控制项)' : '未超标';
+    return `${base}\n    工况=${d.conditions} 指标=${d.metrics} 结论=${d.conclusion} ${verdict}`;
+  });
+  document.getElementById('reviews').textContent = lines.join('\n') || '暂无复核待办';
+}
+
+async function submitReview() {
+  const id = document.getElementById('rvTask').value.trim();
+  const body = {
+    action: 'submit',
+    data: {
+      conditions: document.getElementById('rvConditions').value,
+      metrics: document.getElementById('rvMetrics').value,
+      conclusion: document.getElementById('rvConclusion').value,
+      within_limits: !document.getElementById('rvExceeded').checked,
+    },
+  };
+  const response = await fetch(`/api/entities/${id}/actions`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json', 'X-User-Id': document.getElementById('rvUser').value || 'E-1', 'X-Role': 'engineer'},
+    body: JSON.stringify(body),
+  });
+  document.getElementById('result').textContent = JSON.stringify(await response.json(), null, 2);
+  loadReviews();
 }
 </script>
 </body>

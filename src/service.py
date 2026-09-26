@@ -1,8 +1,20 @@
+from datetime import datetime, timedelta, timezone
 from uuid import uuid4
 
 from .audit import AuditTrail
 from .domain import ConflictError, NotFoundError
-from .rules import RuleEngine
+from .rules import RuleEngine, review_windows
+
+
+def _today():
+    return datetime.now(timezone.utc).date()
+
+
+def _parse_date(value):
+    try:
+        return datetime.fromisoformat(str(value)[:10]).date()
+    except (TypeError, ValueError):
+        return None
 
 
 class DomainService:
@@ -56,7 +68,36 @@ class DomainService:
             updated["status"],
             {"patch": patch},
         )
+        self._apply_side_effects(actor, entity, action, updated, patch)
         return updated
+
+    def _apply_side_effects(self, actor, entity, action, updated, patch):
+        if entity["kind"] == "change" and action == "commission":
+            base = _parse_date(patch.get("commissioned_at")) or _today()
+            risk_level = updated["data"].get("risk_level")
+            for days in review_windows(risk_level):
+                self._system_create(actor, "review_task", {
+                    "change_id": updated["id"],
+                    "window": "%dd" % days,
+                    "due_date": (base + timedelta(days=days)).isoformat(),
+                    "risk_level": risk_level,
+                })
+        if entity["kind"] == "review_task" and action == "submit":
+            if patch.get("within_limits") is False:
+                self._system_create(actor, "action_item", {
+                    "change_id": updated["data"].get("change_id"),
+                    "description": "复核超标控制项(%s): %s"
+                    % (updated["data"].get("window"), patch.get("conclusion")),
+                    "owner": patch.get("control_owner") or actor.user_id,
+                    "source_review_id": updated["id"],
+                })
+
+    def _system_create(self, actor, kind, payload):
+        entity = self.repository.create_entity(
+            str(uuid4()), kind, self.rules.initial_status(kind), payload, actor.user_id
+        )
+        self.audit.record(entity["id"], actor, "auto_create", None, entity["status"], {"kind": kind})
+        return entity
 
     def get(self, entity_id):
         entity = self.repository.get_entity(entity_id)

@@ -24,7 +24,14 @@ python3 app.py --db ./data.db --port 8310
 
 ## 核心对象
 
-- `unit`：装置运行状态；`change`：变更申请；`action_item`：风险控制行动项。
+- `unit`：装置运行状态；`change`：变更申请；`action_item`：风险控制行动项；`review_task`：投产后效果复核待办。
+
+## 投产后效果复核
+
+- 变更`commission`（投产）时自动生成复核待办：高风险（`high`/`critical`）生成30天和90天两次，其余风险只生成90天一次；可用`commissioned_at`指定投产日期作为起算日。
+- 待办到期后才能`submit`，必填`conditions`（工况）、`metrics`（指标）、`conclusion`（偏差结论）、`within_limits`（是否超标）。
+- `within_limits=false`时自动创建`action_item`控制项；变更`close`时若存在未提交的复核待办或未验证的控制项会被拒绝。
+- 复核记录提交后不可更改（`submitted`为终态），待办和结论可通过`GET /api/review_tasks`或首页查看。
 
 ## 主要接口
 
