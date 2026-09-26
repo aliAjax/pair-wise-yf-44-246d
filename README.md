@@ -24,7 +24,7 @@ python3 app.py --db ./data.db --port 8310
 
 ## 核心对象
 
-- `unit`：装置运行状态；`change`：变更申请；`action_item`：风险控制行动项。
+- `unit`：装置运行状态；`change`：变更申请；`action_item`：风险控制行动项；`effect_review`：投产后效果复核待办与结论。
 
 ## 主要接口
 
@@ -36,6 +36,16 @@ python3 app.py --db ./data.db --port 8310
 - `GET /api/audit`：读取审计记录。
 
 请求身份通过`X-User-Id`和`X-Role`请求头传入。创建和动作的可执行角色由规则引擎控制。
+
+## 投产后效果复核
+
+- 变更执行`commission`投产时自动生成复核待办：高风险和重大风险生成30天、90天两条；低风险及其他风险仅生成90天一条。
+- `effect_review`只能由系统在投产事务中生成，不允许手工创建；查询别名：`GET /api/effect_reviews`。
+- 到期后由运行、工程或安全角色提交`submit`，必须填写`operating_conditions`（工况）、`indicators`（指标）和`deviation_conclusion`（`within_limit`或`exceeded`）。
+- 复核提交后状态为`completed`，记录入库并保留审计轨迹；领域状态机不提供修改或重开复核的动作。
+- 偏差结论为`exceeded`时，会在同一事务中自动生成一条`action_item`控制项。控制项完成并验证前，变更不能关闭。
+- 正常投产的变更执行`close`时，规则会检查所有应到复核均已完成；若任一复核超标，其关联控制项必须为`verified`。因异常执行`rollback`后的关闭不要求效果复核。
+- 演示页面会展示待办、已填写工况/指标/偏差结论、自动控制项，并支持提交复核、整改验证和关闭申请。
 
 ## 测试
 

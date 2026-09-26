@@ -140,6 +140,76 @@ class SQLiteRepository:
             connection.close()
         return self.get_entity(entity_id)
 
+    def update_and_create(self, updates, creates):
+        """Apply entity updates and creates in one SQLite transaction."""
+        now = utcnow()
+        connection = self._connect()
+        created_ids = []
+        updated_ids = []
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for update in updates:
+                entity_id = update["entity_id"]
+                row = connection.execute(
+                    "SELECT version FROM entities WHERE id = ?", (entity_id,)
+                ).fetchone()
+                if not row:
+                    raise NotFoundError("entity not found: " + entity_id)
+                current_version = int(row["version"])
+                expected_version = update.get("expected_version")
+                if expected_version is not None and current_version != int(expected_version):
+                    raise ConflictError(
+                        "version conflict: expected %s, found %s"
+                        % (expected_version, current_version)
+                    )
+                payload = json.dumps(
+                    update["data"], ensure_ascii=False, sort_keys=True
+                )
+                connection.execute(
+                    "UPDATE entities SET status = ?, version = version + 1, data = ?, "
+                    "updated_at = ? WHERE id = ? AND version = ?",
+                    (
+                        update["status"],
+                        payload,
+                        now,
+                        entity_id,
+                        current_version,
+                    ),
+                )
+                updated_ids.append(entity_id)
+
+            for create in creates:
+                payload = json.dumps(
+                    create["data"], ensure_ascii=False, sort_keys=True
+                )
+                connection.execute(
+                    "INSERT INTO entities(id, kind, status, version, data, created_by, "
+                    "created_at, updated_at) VALUES (?, ?, ?, 1, ?, ?, ?, ?)",
+                    (
+                        create["id"],
+                        create["kind"],
+                        create["status"],
+                        payload,
+                        create["actor_id"],
+                        now,
+                        now,
+                    ),
+                )
+                created_ids.append(create["id"])
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.close()
+
+        results = {"updated": [], "created": []}
+        for entity_id in updated_ids:
+            results["updated"].append(self.get_entity(entity_id))
+        for entity_id in created_ids:
+            results["created"].append(self.get_entity(entity_id))
+        return results
+
     def append_audit(self, entity_id, actor_id, actor_role, action, from_status, to_status, detail):
         with self._connect() as connection:
             connection.execute(

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from .domain import (
     ConflictError,
@@ -6,6 +6,10 @@ from .domain import (
     PermissionDenied,
     ValidationError,
 )
+
+
+def _default_clock():
+    return datetime.now(timezone.utc)
 
 
 def _validate_change(actor, data, lookup):
@@ -21,11 +25,18 @@ def required_approval_level(risk_level):
     return levels.get(str(risk_level).lower(), 4)
 
 
-def _validate_assess(actor, entity, data, lookup):
+def review_schedule_for_risk(risk_level):
+    """Return post-commission review offsets in days."""
+    if str(risk_level).lower() in ("high", "critical"):
+        return [30, 90]
+    return [90]
+
+
+def _validate_assess(actor, entity, data, lookup, clock):
     return {"required_approvals": required_approval_level(data.get("risk_level"))}
 
 
-def _validate_approve(actor, entity, data, lookup):
+def _validate_approve(actor, entity, data, lookup, clock):
     required = int(entity["data"].get("required_approvals", 1))
     approvals = data.get("approvals") or []
     if len(set(approvals)) < required:
@@ -33,7 +44,7 @@ def _validate_approve(actor, entity, data, lookup):
     return {"approved_by": actor.user_id}
 
 
-def _validate_commission(actor, entity, data, lookup):
+def _validate_commission(actor, entity, data, lookup, clock):
     items = lookup("action_item", "change_id", entity["id"]) or [] if lookup else []
     unresolved = [item["id"] for item in items if item["status"] != "verified"]
     if unresolved:
@@ -41,18 +52,194 @@ def _validate_commission(actor, entity, data, lookup):
     return {"commissioned_by": actor.user_id}
 
 
-CUSTOM_CREATE = {'change': _validate_change}
-CUSTOM_TRANSITIONS = {('change', 'assess'): _validate_assess, ('change', 'approve'): _validate_approve, ('change', 'commission'): _validate_commission}
+def _reject_generated_review(actor, data, lookup):
+    raise ValidationError(
+        "effect_review records are generated automatically when a change is commissioned"
+    )
+
+
+def _validate_effect_review_submit(actor, entity, data, lookup, clock):
+    condition = data.get("operating_conditions")
+    if not isinstance(condition, str) or not condition.strip():
+        raise ValidationError("operating_conditions must be a non-empty string")
+
+    indicators = data.get("indicators")
+    if not isinstance(indicators, list) or not indicators:
+        raise ValidationError("indicators must be a non-empty list")
+    for indicator in indicators:
+        if not isinstance(indicator, dict):
+            raise ValidationError("each indicator must be an object")
+        if not str(indicator.get("name", "")).strip():
+            raise ValidationError("each indicator requires a name")
+        if indicator.get("value") in (None, ""):
+            raise ValidationError("each indicator requires a value")
+
+    conclusion = data.get("deviation_conclusion")
+    if conclusion not in ("within_limit", "exceeded"):
+        raise ValidationError(
+            "deviation_conclusion must be 'within_limit' or 'exceeded'"
+        )
+
+    today = clock().date()
+    due_date = datetime.fromisoformat(entity["data"]["due_date"]).date()
+    if today < due_date:
+        raise ValidationError("effect review is not due until " + due_date.isoformat())
+
+    return {
+        "deviation_result": conclusion,
+        "submitted_by": actor.user_id,
+        "submitted_date": today.isoformat(),
+        "submitted_at": clock().isoformat(timespec="seconds"),
+    }
+
+
+def _validate_close(actor, entity, data, lookup, clock):
+    if entity["status"] != "commissioned" or not lookup:
+        return {}
+
+    change_id = entity["id"]
+    reviews = lookup("effect_review", "change_id", change_id) or []
+    schedule = review_schedule_for_risk(entity["data"].get("risk_level", "low"))
+
+    pending = []
+    for days in schedule:
+        completed = next(
+            (
+                review
+                for review in reviews
+                if review["data"].get("stage_days") == days
+                and review["status"] == "completed"
+            ),
+            None,
+        )
+        if not completed:
+            pending.append("%sd" % days)
+    if pending:
+        raise ValidationError("pending effect reviews: " + ", ".join(pending))
+
+    for review in reviews:
+        if review["status"] != "completed":
+            continue
+        if review["data"].get("deviation_result") != "exceeded":
+            continue
+        controls = lookup("action_item", "source_review_id", review["id"]) or []
+        unresolved = [
+            item["id"] + ":" + item["status"]
+            for item in controls
+            if item["status"] != "verified"
+        ]
+        if not controls or unresolved:
+            detail = ", ".join(unresolved) if unresolved else "missing control item"
+            raise ValidationError(
+                "unresolved control item for exceeded effect review %s: %s"
+                % (review["id"], detail)
+            )
+
+    return {}
+
+
+CUSTOM_CREATE = {
+    "change": _validate_change,
+    "effect_review": _reject_generated_review,
+}
+CUSTOM_TRANSITIONS = {
+    ("change", "assess"): _validate_assess,
+    ("change", "approve"): _validate_approve,
+    ("change", "commission"): _validate_commission,
+    ("change", "close"): _validate_close,
+    ("effect_review", "submit"): _validate_effect_review_submit,
+}
 
 
 class RuleEngine:
-    ALIASES = {'units': 'unit', 'changes': 'change', 'action_items': 'action_item'}
-    INITIAL_STATUS = {'unit': 'operating', 'change': 'draft', 'action_item': 'open'}
-    TRANSITIONS = {'unit': {'shutdown': (('operating',), 'shutdown'), 'startup': (('shutdown',), 'operating'), 'freeze': (('operating',), 'frozen'), 'unfreeze': (('frozen',), 'operating')}, 'change': {'assess': (('draft',), 'assessed'), 'approve': (('assessed',), 'approved'), 'implement': (('approved',), 'implemented'), 'commission': (('implemented',), 'commissioned'), 'rollback': (('implemented', 'commissioned'), 'rolled_back'), 'close': (('rolled_back',), 'closed')}, 'action_item': {'complete': (('open',), 'completed'), 'verify': (('completed',), 'verified'), 'reopen': (('verified',), 'open')}}
-    CREATE_REQUIRED = {'unit': ('name', 'location'), 'change': ('unit_id', 'description'), 'action_item': ('change_id', 'description', 'owner')}
-    ACTION_REQUIRED = {('unit', 'shutdown'): ('reason',), ('unit', 'freeze'): ('reason',), ('change', 'assess'): ('risk_level', 'analyst'), ('change', 'approve'): ('approvals', 'permit_id'), ('change', 'implement'): ('procedure_version',), ('change', 'commission'): ('tests_passed',), ('change', 'rollback'): ('reason',), ('change', 'close'): ('outcome',), ('action_item', 'complete'): ('completed_by', 'evidence'), ('action_item', 'verify'): ('verifier',), ('action_item', 'reopen'): ('reason',)}
-    CREATE_ROLES = {'unit': ('admin', 'engineer'), 'change': ('admin', 'engineer'), 'action_item': ('admin', 'safety')}
-    ROLE_ACTIONS = {'shutdown': ('admin', 'operator'), 'startup': ('admin', 'operator'), 'freeze': ('admin', 'operator'), 'unfreeze': ('admin', 'operator'), 'assess': ('admin', 'engineer'), 'approve': ('admin', 'safety'), 'implement': ('admin', 'engineer'), 'commission': ('admin', 'engineer'), 'rollback': ('admin', 'engineer'), 'close': ('admin', 'safety'), 'complete': ('admin', 'engineer'), 'verify': ('admin', 'verifier'), 'reopen': ('admin', 'verifier')}
+    ALIASES = {
+        "units": "unit",
+        "changes": "change",
+        "action_items": "action_item",
+        "effect_reviews": "effect_review",
+    }
+    INITIAL_STATUS = {
+        "unit": "operating",
+        "change": "draft",
+        "action_item": "open",
+        "effect_review": "pending",
+    }
+    TRANSITIONS = {
+        "unit": {
+            "shutdown": (("operating",), "shutdown"),
+            "startup": (("shutdown",), "operating"),
+            "freeze": (("operating",), "frozen"),
+            "unfreeze": (("frozen",), "operating"),
+        },
+        "change": {
+            "assess": (("draft",), "assessed"),
+            "approve": (("assessed",), "approved"),
+            "implement": (("approved",), "implemented"),
+            "commission": (("implemented",), "commissioned"),
+            "rollback": (("implemented", "commissioned"), "rolled_back"),
+            "close": (("rolled_back", "commissioned"), "closed"),
+        },
+        "action_item": {
+            "complete": (("open",), "completed"),
+            "verify": (("completed",), "verified"),
+            "reopen": (("verified",), "open"),
+        },
+        "effect_review": {
+            "submit": (("pending",), "completed"),
+        },
+    }
+    CREATE_REQUIRED = {
+        "unit": ("name", "location"),
+        "change": ("unit_id", "description"),
+        "action_item": ("change_id", "description", "owner"),
+        "effect_review": (),
+    }
+    ACTION_REQUIRED = {
+        ("unit", "shutdown"): ("reason",),
+        ("unit", "freeze"): ("reason",),
+        ("change", "assess"): ("risk_level", "analyst"),
+        ("change", "approve"): ("approvals", "permit_id"),
+        ("change", "implement"): ("procedure_version",),
+        ("change", "commission"): ("tests_passed",),
+        ("change", "rollback"): ("reason",),
+        ("change", "close"): ("outcome",),
+        ("action_item", "complete"): ("completed_by", "evidence"),
+        ("action_item", "verify"): ("verifier",),
+        ("action_item", "reopen"): ("reason",),
+        ("effect_review", "submit"): (
+            "operating_conditions",
+            "indicators",
+            "deviation_conclusion",
+        ),
+    }
+    CREATE_ROLES = {
+        "unit": ("admin", "engineer"),
+        "change": ("admin", "engineer"),
+        "action_item": ("admin", "safety"),
+    }
+    ROLE_ACTIONS = {
+        "shutdown": ("admin", "operator"),
+        "startup": ("admin", "operator"),
+        "freeze": ("admin", "operator"),
+        "unfreeze": ("admin", "operator"),
+        "assess": ("admin", "engineer"),
+        "approve": ("admin", "safety"),
+        "implement": ("admin", "engineer"),
+        "commission": ("admin", "engineer"),
+        "rollback": ("admin", "engineer"),
+        "close": ("admin", "safety"),
+        "complete": ("admin", "engineer"),
+        "verify": ("admin", "verifier"),
+        "reopen": ("admin", "verifier"),
+        "submit": ("admin", "operator", "engineer", "safety"),
+    }
+
+    def __init__(self, clock=None):
+        self.clock = clock or _default_clock
+
+    @staticmethod
+    def review_schedule(risk_level):
+        return review_schedule_for_risk(risk_level)
 
     def normalize_kind(self, kind):
         return self.ALIASES.get(kind, kind)
@@ -102,7 +289,7 @@ class RuleEngine:
         self._ensure_role(actor, allowed_roles)
         self._require(data, self.ACTION_REQUIRED.get((kind, action), ()))
         custom = CUSTOM_TRANSITIONS.get((kind, action))
-        extra = custom(actor, entity, data, lookup) if custom else {}
+        extra = custom(actor, entity, data, lookup, self.clock) if custom else {}
         patch = dict(data)
         if extra:
             patch.update(extra)

@@ -5,30 +5,360 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>化工装置变更与工艺安全管理</title>
   <style>
-    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #1f2937; }
-    main { max-width: 820px; margin: auto; }
-    pre { background: #f3f4f6; padding: 1rem; border-radius: 8px; overflow-x: auto; }
-    button { padding: .5rem .8rem; cursor: pointer; }
+    :root {
+      --border: #d1d5db;
+      --muted: #6b7280;
+      --bg-soft: #f9fafb;
+      --danger-bg: #fee2e2;
+      --danger-text: #991b1b;
+      --warn-bg: #fef3c7;
+      --warn-text: #92400e;
+      --ok-bg: #dcfce7;
+      --ok-text: #166534;
+    }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; margin: 2rem; color: #1f2937; background: #f3f4f6; }
+    main { max-width: 1180px; margin: auto; }
+    h1 { margin-bottom: .25rem; }
+    h2 { margin-top: 2rem; }
+    .muted { color: var(--muted); }
+    .card { background: white; border: 1px solid var(--border); border-radius: 10px; padding: 1rem; margin: 1rem 0; box-shadow: 0 1px 2px rgba(0,0,0,.04); }
+    .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 1rem; }
+    table { width: 100%; border-collapse: collapse; font-size: .92rem; }
+    th, td { border-bottom: 1px solid #e5e7eb; padding: .55rem; text-align: left; vertical-align: top; }
+    th { background: var(--bg-soft); font-weight: 600; }
+    label { display: block; font-size: .85rem; font-weight: 600; margin: .65rem 0 .25rem; }
+    input, textarea, select { box-sizing: border-box; width: 100%; padding: .5rem; border: 1px solid var(--border); border-radius: 6px; font: inherit; }
+    textarea { min-height: 76px; }
+    button { padding: .55rem .85rem; cursor: pointer; border: 1px solid #2563eb; background: #2563eb; color: white; border-radius: 6px; }
+    button.secondary { background: white; color: #2563eb; }
+    .badge { display: inline-block; border-radius: 999px; padding: .15rem .55rem; font-size: .78rem; font-weight: 600; background: #e5e7eb; color: #374151; }
+    .pending { background: var(--warn-bg); color: var(--warn-text); }
+    .completed { background: var(--ok-bg); color: var(--ok-text); }
+    .exceeded { background: var(--danger-bg); color: var(--danger-text); }
+    .within, .within-limit { background: var(--ok-bg); color: var(--ok-text); }
+    .open, .reopened { background: var(--danger-bg); color: var(--danger-text); }
+    .verified { background: var(--ok-bg); color: var(--ok-text); }
+    .result { white-space: pre-wrap; background: var(--bg-soft); padding: .75rem; border-radius: 8px; overflow-x: auto; }
+    .row-actions { margin-top: .75rem; display: flex; gap: .5rem; align-items: center; }
+    code { background: #e5e7eb; padding: .1rem .25rem; border-radius: 4px; }
   </style>
 </head>
 <body>
 <main>
   <h1>化工装置变更与工艺安全管理</h1>
-  <p>这是最小演示页面。使用浏览器或 curl 调用 JSON API。</p>
-  <p><button onclick="checkHealth()">检查服务状态</button></p>
-  <pre id="result">等待操作</pre>
-  <h2>常用接口</h2>
-  <pre>GET  /health
-GET  /api/&lt;kind&gt;
-POST /api/&lt;kind&gt;
-GET  /api/entities/&lt;id&gt;
-POST /api/entities/&lt;id&gt;/actions</pre>
+  <p class="muted">投产后效果复核：高风险/重大风险自动生成 30 天和 90 天待办；低风险及其他风险仅生成 90 天待办。结论入库后不可修改。</p>
+  <p><button onclick="loadAll()">刷新数据</button> <span id="health" class="muted"></span></p>
+
+  <section class="card">
+    <h2>效果复核待办与结论</h2>
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>状态</th>
+            <th>阶段/到期日</th>
+            <th>变更</th>
+            <th>风险</th>
+            <th>工况</th>
+            <th>指标</th>
+            <th>偏差结论</th>
+            <th>控制项</th>
+            <th>版本</th>
+          </tr>
+        </thead>
+        <tbody id="reviews"><tr><td colspan="9" class="muted">尚未加载</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <div class="grid">
+    <section class="card">
+      <h2>填写到期复核</h2>
+      <form id="reviewForm">
+        <div class="grid">
+          <div>
+            <label for="reviewUser">用户</label>
+            <input id="reviewUser" value="operator-1">
+          </div>
+          <div>
+            <label for="reviewRole">角色</label>
+            <select id="reviewRole">
+              <option value="operator">operator</option>
+              <option value="engineer">engineer</option>
+              <option value="safety">safety</option>
+              <option value="admin">admin</option>
+            </select>
+          </div>
+        </div>
+        <label for="reviewId">复核待办 ID</label>
+        <input id="reviewId" required placeholder="点击上方待办行的“填写”按钮">
+        <label for="reviewVersion">版本号</label>
+        <input id="reviewVersion" type="number" required>
+        <label for="conditions">工况</label>
+        <textarea id="conditions" required placeholder="例如：满负荷稳定运行，反应温度、压力正常"></textarea>
+        <label for="indicators">指标（JSON）</label>
+        <textarea id="indicators" required>[{"name":"反应温度","value":"82℃","limit":"≤85℃"},{"name":"压力","value":"1.8MPa","limit":"≤2.0MPa"}]</textarea>
+        <label for="conclusion">偏差结论</label>
+        <select id="conclusion">
+          <option value="within_limit">未超标</option>
+          <option value="exceeded">超标</option>
+        </select>
+        <div class="row-actions"><button type="submit">提交复核（入库后不可改）</button></div>
+      </form>
+    </section>
+
+    <section class="card">
+      <h2>控制项整改与变更关闭</h2>
+      <form id="controlForm">
+        <div class="grid">
+          <div>
+            <label for="controlUser">用户</label>
+            <input id="controlUser" value="admin">
+          </div>
+          <div>
+            <label for="controlRole">角色</label>
+            <select id="controlRole">
+              <option value="admin">admin</option>
+              <option value="engineer">engineer</option>
+              <option value="verifier">verifier</option>
+            </select>
+          </div>
+        </div>
+        <label for="controlId">控制项 ID</label>
+        <input id="controlId" required>
+        <label for="controlAction">动作</label>
+        <select id="controlAction">
+          <option value="complete">完成整改</option>
+          <option value="verify">验证关闭</option>
+          <option value="reopen">重新打开</option>
+        </select>
+        <div class="row-actions"><button type="submit">提交控制项动作</button></div>
+      </form>
+
+      <form id="closeForm" style="margin-top:1.5rem">
+        <div class="grid">
+          <div>
+            <label for="closeUser">用户</label>
+            <input id="closeUser" value="safety-1">
+          </div>
+          <div>
+            <label for="closeRole">角色</label>
+            <input id="closeRole" value="safety">
+          </div>
+        </div>
+        <label for="changeId">变更 ID</label>
+        <input id="changeId" required>
+        <label for="outcome">关闭结论</label>
+        <input id="outcome" value="投产后效果复核完成，运行满足要求" required>
+        <div class="row-actions"><button type="submit" class="secondary">申请关闭变更</button></div>
+      </form>
+    </section>
+  </div>
+
+  <section class="card">
+    <h2>变更</h2>
+    <table>
+      <thead><tr><th>状态</th><th>ID</th><th>说明</th><th>风险</th><th>版本</th></tr></thead>
+      <tbody id="changes"><tr><td colspan="5" class="muted">尚未加载</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>风险控制项</h2>
+    <table>
+      <thead><tr><th>状态</th><th>ID</th><th>变更</th><th>说明</th><th>责任人</th><th>来源</th></tr></thead>
+      <tbody id="actions"><tr><td colspan="6" class="muted">尚未加载</td></tr></tbody>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>接口结果</h2>
+    <pre id="result" class="result">等待操作</pre>
+  </section>
 </main>
 <script>
-async function checkHealth() {
-  const response = await fetch('/health');
-  document.getElementById('result').textContent = JSON.stringify(await response.json(), null, 2);
+const labels = {
+  pending: '待办',
+  completed: '已完成',
+  within_limit: '未超标',
+  exceeded: '超标',
+  high: '高',
+  critical: '重大',
+  medium: '中',
+  low: '低'
+};
+let reviews = [];
+
+function show(value) {
+  document.getElementById('result').textContent = typeof value === 'string' ? value : JSON.stringify(value, null, 2);
 }
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
+}
+
+function badge(value) {
+  const cls = String(value || '').replaceAll('_', '-');
+  return `<span class="badge ${esc(cls)}">${esc(labels[value] || value)}</span>`;
+}
+
+async function api(path, options = {}) {
+  const response = await fetch(path, {
+    headers: {'Content-Type': 'application/json', ...(options.headers || {})},
+    ...options
+  });
+  const payload = await response.json();
+  if (!response.ok) throw Object.assign(new Error(payload.error || 'request failed'), {payload});
+  return payload;
+}
+
+async function loadAll() {
+  try {
+    const health = await api('/health');
+    document.getElementById('health').textContent = '服务状态：' + health.status;
+    const [reviewPayload, changePayload, actionPayload] = await Promise.all([
+      api('/api/effect_reviews'),
+      api('/changes'),
+      api('/action_items')
+    ]);
+    reviews = reviewPayload.items || [];
+    renderReviews(reviews);
+    renderChanges(changePayload.items || []);
+    renderActions(actionPayload.items || []);
+    show({loaded: {reviews: reviews.length, changes: changePayload.items.length, action_items: actionPayload.items.length}});
+  } catch (error) {
+    show(error.payload || error.message);
+  }
+}
+
+function renderReviews(items) {
+  const body = document.getElementById('reviews');
+  if (!items.length) {
+    body.innerHTML = '<tr><td colspan="9" class="muted">暂无效果复核记录</td></tr>';
+    return;
+  }
+  body.innerHTML = items
+    .slice().sort((a, b) => (a.data.due_date || '').localeCompare(b.data.due_date || ''))
+    .map(item => {
+      const data = item.data;
+      const indicators = (data.indicators || []).map(i => `${esc(i.name)}: ${esc(i.value)}${i.limit ? ` / ${esc(i.limit)}` : ''}`).join('<br>');
+      const actionId = data.action_item_id;
+      const conclusion = item.status === 'completed' ? badge(data.deviation_result) : '<span class="muted">到期填写</span>';
+      const fill = item.status === 'pending' ? `<button class="secondary" onclick="fillReview('${esc(item.id)}', ${item.version})">填写</button>` : '';
+      return `<tr>
+        <td>${badge(item.status)}<br>${fill}</td>
+        <td>${esc(data.stage_label)}<br><strong>${esc(data.due_date)}</strong></td>
+        <td><code>${esc(data.change_id)}</code></td>
+        <td>${badge(data.risk_level)}</td>
+        <td>${esc(data.operating_conditions || '')}</td>
+        <td>${indicators}</td>
+        <td>${conclusion}</td>
+        <td>${actionId ? `<code>${esc(actionId)}</code>` : ''}</td>
+        <td>${item.version}</td>
+      </tr>`;
+    }).join('');
+}
+
+function renderChanges(items) {
+  const body = document.getElementById('changes');
+  body.innerHTML = items.length ? items.map(item => `<tr>
+    <td>${badge(item.status)}</td>
+    <td><code>${esc(item.id)}</code></td>
+    <td>${esc(item.data.description)}</td>
+    <td>${item.data.risk_level ? badge(item.data.risk_level) : ''}</td>
+    <td>${item.version}</td>
+  </tr>`).join('') : '<tr><td colspan="5" class="muted">暂无变更</td></tr>';
+}
+
+function renderActions(items) {
+  const body = document.getElementById('actions');
+  body.innerHTML = items.length ? items.map(item => `<tr>
+    <td>${badge(item.status)}</td>
+    <td><code>${esc(item.id)}</code></td>
+    <td><code>${esc(item.data.change_id)}</code></td>
+    <td>${esc(item.data.description)}</td>
+    <td>${esc(item.data.owner)}</td>
+    <td>${esc(item.data.source || '人工创建')}</td>
+  </tr>`).join('') : '<tr><td colspan="6" class="muted">暂无控制项</td></tr>';
+}
+
+function fillReview(id, version) {
+  document.getElementById('reviewId').value = id;
+  document.getElementById('reviewVersion').value = version;
+  document.getElementById('conditions').focus();
+}
+
+function postAction(path, user, role, body) {
+  return api(path, {
+    method: 'POST',
+    headers: {'X-User-Id': user, 'X-Role': role},
+    body: JSON.stringify(body)
+  });
+}
+
+document.getElementById('reviewForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    const indicators = JSON.parse(document.getElementById('indicators').value);
+    const result = await postAction(
+      `/api/entities/${encodeURIComponent(document.getElementById('reviewId').value)}/actions`,
+      document.getElementById('reviewUser').value,
+      document.getElementById('reviewRole').value,
+      {
+        action: 'submit',
+        expected_version: Number(document.getElementById('reviewVersion').value),
+        data: {
+          operating_conditions: document.getElementById('conditions').value,
+          indicators,
+          deviation_conclusion: document.getElementById('conclusion').value
+        }
+      }
+    );
+    show(result);
+    await loadAll();
+  } catch (error) {
+    show(error.payload || error.message);
+  }
+});
+
+document.getElementById('controlForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    const action = document.getElementById('controlAction').value;
+    const user = document.getElementById('controlUser').value;
+    const data = action === 'complete'
+      ? {completed_by: user, evidence: 'effect-review-correction'}
+      : action === 'verify' ? {verifier: user} : {reason: 'deviation remains'};
+    const result = await postAction(
+      `/api/entities/${encodeURIComponent(document.getElementById('controlId').value)}/actions`,
+      user,
+      document.getElementById('controlRole').value,
+      {action, data}
+    );
+    show(result);
+    await loadAll();
+  } catch (error) {
+    show(error.payload || error.message);
+  }
+});
+
+document.getElementById('closeForm').addEventListener('submit', async event => {
+  event.preventDefault();
+  try {
+    const result = await postAction(
+      `/api/entities/${encodeURIComponent(document.getElementById('changeId').value)}/actions`,
+      document.getElementById('closeUser').value,
+      document.getElementById('closeRole').value,
+      {action: 'close', data: {outcome: document.getElementById('outcome').value}}
+    );
+    show(result);
+    await loadAll();
+  } catch (error) {
+    show(error.payload || error.message);
+  }
+});
+
+loadAll();
 </script>
 </body>
 </html>
